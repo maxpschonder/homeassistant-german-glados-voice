@@ -1,0 +1,4 @@
+__pycache__
+.venv
+message_*.mp3
+message_*.wav

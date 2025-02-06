@@ -1,27 +1,29 @@
-from gtts import gTTS
-from functools import partial
-from pathlib import Path
-import argparse
-import librosa
-import librosa.display
-import numpy as np
-import matplotlib.pyplot as plt
-import soundfile as sf
-import scipy.signal as sig
-import psola
-import sys
 import os
-from pydub import AudioSegment
-from flask import Flask, send_file, request
+from pathlib import Path
 from urllib import parse
+
+import librosa
+import numpy as np
+import psola
+import soundfile as sf
+from flask import Flask, request, send_file
+from gtts import gTTS
+from pydub import AudioSegment
 
 app = Flask(__name__)
 
-frame_length_input = 2048
-fmin_input = librosa.note_to_hz('C2')
-fmax_input = librosa.note_to_hz('C7')
+frame_length_input = int(os.getenv("FRAME_LENGTH_INPUT", 2048))
+fmin_input = librosa.note_to_hz(os.getenv("FMIN_INPUT", "C2"))
+fmax_input = librosa.note_to_hz(os.getenv("FMAX_INPUT", "C7"))
+pitch = int(os.getenv("PITCH", 5))
+temp_path = os.getenv("TEMP_PATH", "./")
 
-pitch = 8  # I like the voice on 8, but feel free to experiment around!
+# Ensure that the temp_path ends with a slash
+if temp_path[-1] != "/":
+    temp_path += "/"
+
+# make sure the temp_path exists
+Path(temp_path).mkdir(parents=True, exist_ok=True)
 
 
 # Function to correct the pitch of a fundamental frequency value
@@ -30,7 +32,7 @@ def correct(f0):
         return np.nan
 
     # Define the degrees of the musical notes in a scale
-    note_degrees = librosa.key_to_degrees('C#:min')
+    note_degrees = librosa.key_to_degrees("C#:min")
     note_degrees = np.concatenate((note_degrees, [note_degrees[0] + 12]))
 
     # Convert the fundamental frequency to MIDI note value and calculate the closest degree
@@ -55,59 +57,66 @@ def correctpitch(f0):
 # Function to perform pitch correction and autotune
 def autotune(y, sr):
     # Estimate the fundamental frequency using the PYIN algorithm
-    f0, _, _ = librosa.pyin(y, frame_length=frame_length_input, hop_length=(frame_length_input // 4),
-                            sr=sr, fmin=fmin_input, fmax=fmax_input)
+    f0, _, _ = librosa.pyin(
+        y,
+        frame_length=frame_length_input,
+        hop_length=(frame_length_input // 4),
+        sr=sr,
+        fmin=fmin_input,
+        fmax=fmax_input,
+    )
     # Correct the pitch of the estimated fundamental frequencies
     corrected_pitch = correctpitch(f0)
     # Perform PSOLA-based pitch shifting to match the corrected pitch
-    return psola.vocode(y, sample_rate=int(sr), target_pitch=corrected_pitch, fmin=fmin_input, fmax=fmax_input)
+    return psola.vocode(
+        y,
+        sample_rate=int(sr),
+        target_pitch=corrected_pitch,
+        fmin=fmin_input,
+        fmax=fmax_input,
+    )
 
 
 # Main function to perform text-to-speech and pitch correction
 def main(speakthis):
     # Generate the speech audio file using gTTS (Google Text-to-Speech)
     tts = gTTS(speakthis, tld="de", lang="de")
-    tts.save('hello.mp3')
+    tts.save(temp_path + "message.mp3")
 
     # Convert the MP3 file to WAV format using pydub
-    audio = AudioSegment.from_mp3('hello.mp3')
-    audio.export('hello.wav', format="wav")
+    audio = AudioSegment.from_mp3(temp_path + "message.mp3")
+    audio.export(temp_path + "message.wav", format="wav")
 
     # Load the WAV file using librosa
-    y, sr = librosa.load("hello.wav", sr=None, mono=False)
+    y, sr = librosa.load(temp_path + "message.wav", sr=None, mono=False)
     if y.ndim > 1:
         y = y[0, :]
 
-    # Perform pitch correction by shifting the pitch by 2 semitones using librosa.effects.pitch_shift
-    pitch_corrected_y = librosa.effects.pitch_shift(y, sr=sr, n_steps=2)
-    
+    # Perform pitch correction and autotune
     pitch_corrected_y = autotune(y, sr)
 
-    filepath = Path("hello.wav")
-    output_filepath = (filepath.stem + "_pitch_corrected" + filepath.suffix)
+    filepath = Path(temp_path + "message.wav")
+    output_filepath = temp_path + filepath.stem + "_pitch_corrected" + filepath.suffix
 
     # Save the pitch-corrected audio file using soundfile
     sf.write(str(output_filepath), pitch_corrected_y, sr)
 
     # Remove the temporary audio files
-    os.remove("hello.mp3")
-    os.remove("hello.wav")
+    os.remove(temp_path + "message.mp3")
+    os.remove(temp_path + "message.wav")
 
 
-@app.route('/process', methods=['POST'])
+@app.route("/process", methods=["POST"])
 def process():
     # Parse the request data and extract the text to be spoken
-    debugdata = parse.parse_qs(request.data.decode('utf-8'))
-    sprich = str(debugdata["INPUT_TEXT"])
-    sprich = sprich.replace("['", "")
-    sprich = sprich.replace("']", "")
+    request_data = parse.parse_qs(request.data.decode("utf-8"))
 
     # Perform text-to-speech and pitch correction
-    main(sprich)
+    main(request_data["INPUT_TEXT"][0])
 
     # Send the pitch-corrected audio file as a response
-    return send_file("hello_pitch_corrected.wav", mimetype='audio/wav')
+    return send_file(temp_path + "message_pitch_corrected.wav", mimetype="audio/wav")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     app.run(host="0.0.0.0", port="59125")
